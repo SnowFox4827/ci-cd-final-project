@@ -1,0 +1,92 @@
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: app-pipeline
+spec:
+  workspaces:
+    - name: output
+
+  params:
+    - name: repo-url
+    - name: revision
+      default: main
+    - name: app-name
+    - name: build-image
+
+  tasks:
+    - name: cleanup
+      taskRef:
+        name: cleanup
+      workspaces:
+        - name: source
+          workspace: output
+
+    - name: clone
+      runAfter: ["cleanup"]
+      taskRef:
+        name: git-clone
+      params:
+        - name: url
+          value: $(params.repo-url)
+        - name: revision
+          value: $(params.revision)
+      workspaces:
+        - name: output
+          workspace: output
+
+    - name: flake8
+      runAfter: ["clone"]
+      taskSpec:
+        workspaces:
+          - name: source
+        steps:
+          - name: lint
+            image: python:3.9-slim
+            workingDir: $(workspaces.source.path)
+            script: |
+              #!/bin/bash
+              set -e
+              pip install flake8
+              flake8 .
+      workspaces:
+        - name: source
+          workspace: output
+
+    - name: nose
+      runAfter: ["flake8"]
+      taskRef:
+        name: nose
+      workspaces:
+        - name: source
+          workspace: output
+
+    - name: build
+      runAfter: ["nose"]
+      taskRef:
+        name: buildah
+      params:
+        - name: IMAGE
+          value: $(params.build-image)
+      workspaces:
+        - name: source
+          workspace: output
+    - name: deploy
+      runAfter: ["build"]
+      taskSpec:
+        params:
+          - name: app-name
+          - name: build-image
+        steps:
+          - name: deploy
+            image: quay.io/openshift/origin-cli:latest
+            script: |
+              #!/bin/bash
+              set -e
+              oc create deployment $(params.app-name) \
+                --image=$(params.build-image) \
+                --dry-run=client -o yaml | oc apply -f -
+      params:
+        - name: app-name
+          value: $(params.app-name)
+        - name: build-image
+          value: $(params.build-image)
